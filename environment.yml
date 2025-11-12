@@ -1,0 +1,12 @@
+name: wompwomp_env
+channels:
+  - conda-forge
+  - defaults
+  - bioconda
+  - r
+dependencies:
+  - python==3.10
+  - pip
+  - r-base
+  - pip:
+    - .
