@@ -495,22 +495,25 @@ def calculate_objective_fenwick(df, y1, y2, weight = 'count'):
     
     return total_cross_weight
 
-def determine_crossing_edges(df, graphing_columns = None, order_dict = None,
-                             col_weights = "value"):
+def determine_crossing_edges(df, graphing_columns = None, order_dict = None, col_weights = "value"):
+    # converting values into strings
+    for col in graphing_columns:
+        df[col] = df[col].astype('str')
+    
     objective_val = 0
     lode_df = _plot_alluvium(df, graphing_columns, col_weights, order_dict=order_dict,
                       objective_calc=True)
     lode_df = lode_df.sort_index()
     lode_df = lode_df.rename_axis('alluvium').reset_index()
     for h in range(len(graphing_columns)-1):
-        x1 = graphing_columns[h]
-        x2 = graphing_columns[h+1]
+        # x1 = graphing_columns[h]
+        # x2 = graphing_columns[h+1]
     
         y1 = 'y_' + graphing_columns[h]
         y2 = 'y_' + graphing_columns[h+1]
         
         objective_val += calculate_objective_fenwick(lode_df, y1, y2, weight=col_weights)
-    return objective_val
+    return int(objective_val)
 
 def determine_column_order(df_gather, cycle, graphing_columns, column_weights = 'value',
                            matrix_initialization_value_column_order = 1e6, 
@@ -804,16 +807,71 @@ def assign_colors(df_gather, graphing_columns, alluvium_column, match_colors = F
                     color_dict[key] = fill_missing_colors
     return color_dict
 
+def data_sort(
+        df,
+        graphing_columns,
+        column_weights=None,
+        sorting_algorithm="neighbornet",
+        optimize_column_order=True,
+        optimize_column_order_per_cycle=False,
+        matrix_initialization_value=1e6,
+        same_side_matrix_initialization_value=1e6,
+        weight_scalar=5e5,
+        matrix_initialization_value_column_order=1e6,
+        weight_scalar_column_order=1,
+        column_sorting_metric="edge_crossing",
+        column_sorting_algorithm="tsp",
+        cycle_start_positions=None,
+        fixed_column=None,
+        random_initializations=1,
+        verbose=False
+    ):
+    if column_weights is None:
+        column_weights = 'value'
+        df = df.groupby(graphing_columns).size().reset_index(name=column_weights)
+
+    # converting values into strings
+    for col in graphing_columns:
+        df[col] = df[col].astype('str')
+    
+    if verbose:
+        print(f'Sorting Data with sorting algorithm = {sorting_algorithm}')
+    if sorting_algorithm in ['greedy_wolf', 'greedy_wblf']:
+        order_dict = sort_greedy_wolf(df, graphing_columns, fixed_column=fixed_column, 
+                   random_initializations=random_initializations, column_weights = column_weights,
+                   sorting_algorithm = sorting_algorithm, verbose = verbose)
+    else:  # neighbornet or tsp
+        dist_mat, nodes = generate_distance_matrix(df = df, graphing_columns = graphing_columns, 
+                                     col_weights=column_weights,
+                      matrix_initialization_value = matrix_initialization_value, same_side_matrix_initialization_value = same_side_matrix_initialization_value,
+                              weight_scalar = weight_scalar)
+        if verbose:
+            print(f'Sorting Distance matrix with algorithm {sorting_algorithm}')
+        cycle = sort_dist_matrix(dist_mat, nodes, sorting_algorithm = sorting_algorithm)
+        if verbose:
+            print(f'Determining Optimal Cycle Start')
+
+        cycle, graphing_columns = determine_optimal_cycle_start(df, cycle, graphing_columns, column_weights=column_weights, 
+                                                                    optimize_column_order = optimize_column_order,
+                                     optimize_column_order_per_cycle = optimize_column_order_per_cycle, cycle_start_positions = cycle_start_positions,
+                                      matrix_initialization_value_column_order = matrix_initialization_value_column_order,
+                                      weight_scalar_column_order = weight_scalar_column_order, 
+                                        column_sorting_metric = column_sorting_metric,column_sorting_algorithm = column_sorting_algorithm,
+                                                                    verbose = verbose
+                                                 )
+        order_dict = get_order_dict(cycle, graphing_columns)
+    return graphing_columns,order_dict
+    
+
 def plot_alluvial(df, 
                   # general function arguments
                   graphing_columns = None, column_weights = None, 
-                  column1 = None, column2 = None,
                   # general sorting algorithm arguments
-                sorting_algorithm = 'neighbornet', 
+                  sorting_algorithm = 'neighbornet', 
                   # neighbornet-specific arguments
                   optimize_column_order = True, optimize_column_order_per_cycle = False,
                   matrix_initialization_value = 1e6, same_side_matrix_initialization_value = 1e6,
-                          weight_scalar = 5e5, 
+                  weight_scalar = 5e5, 
                   # column order optimizaiton arguments
                   matrix_initialization_value_column_order = 1e6,
                   weight_scalar_column_order = 1, column_sorting_metric = "edge_crossing",column_sorting_algorithm = "tsp", 
@@ -823,80 +881,73 @@ def plot_alluvial(df,
                   # user-defined order arguments
                   order_dict=None, return_order_dict = False,
                   # alluvium arguments
-                alluvium_column = None, color_alluvium = False, color_alluvium_boundary = False, alluvial_alpha = 0.5, alluvial_edge_width = 0.1,
-
+                  alluvium_column = None, color_alluvium = False, color_alluvium_boundary = False, alluvial_alpha = 0.5, alluvial_edge_width = 0.1,
                   # coloring algorithm arguments
                   match_colors = True,
-                   coloring_algorithm = "advanced", coloring_algorithm_advanced_option = "leiden", resolution = 1, threshold = .5,
-                  
+                  coloring_algorithm = "advanced", coloring_algorithm_advanced_option = "leiden", resolution = 1, threshold = .5,
                   # user-defined color arguments
                   color_dict = None, fill_missing_colors = True, cmap_name='tab20', 
-                  
                   # stratum customization options
                   color_boxes = True, include_labels_in_boxes = True, box_line_width = 1,box_width = 0.4, 
-                    # stratum text_customization options
+                  # stratum text_customization options
                   min_text = 4, default_text_size = 14, default_axis_text_size = None, default_label_text_size = None,
                   autofit_text = True, drop_if_min = False,
                   # axis options
-                 y_axis_label = False, invert_xy = False,
-                    # legend options
+                  y_axis_label = False, invert_xy = False,
+                  # legend options
                   include_stratum_legend = False, include_alluvium_legend = False, legend_loc = 'right', 
-                    # figure size options
+                  # figure size options
                   save_height = 6, save_width = 6,
-
                   verbose = False, savefig = False
                  ):
     df_gather = df.copy()
     figsize=(save_height, save_width)
-    # Checking that necessary values are present
-    if graphing_columns is None:
-        if (column1 is None) or (column2 is None):
-            raise ValueError("Neither graphing_columns nor both of column1, column2 are specified")
-        else:
-            graphing_columns = [column1, column2]
-    if graphing_columns is not None:
-        if len(graphing_columns) < 2:
-            raise ValueError("graphing_columns must have at least 2 entries")
 
+    if column_weights is not None and column_weights not in df.columns:
+        raise ValueError(f"column_weights '{column_weights}' not found in dataframe columns.")
+
+    if graphing_columns is None:
+        graphing_columns = list(df.columns)
+        if column_weights is not None:
+            graphing_columns.remove(column_weights)
+    else:
+        missing_columns = [col for col in graphing_columns if col not in df.columns]
+        if len(missing_columns) > 0:
+            raise ValueError(f"Graphing columns {missing_columns} not found in dataframe columns.")
+
+    if len(graphing_columns) < 2:
+        raise ValueError("At least two graphing columns must be specified.")
+
+    # if column_weights is None, then we assume ungrouped and we group it; if column_weights is given, we assume data is pre-grouped
     if column_weights is None:
-        if df.shape[1] < 2:
-            raise ValueError("Dataframe must have 2 columns when column_weights is None.")
-        elif df.shape[1] > 2:
-            raise ValueError("column_weights must be specified when dataframe has more than 2 columns")
-        else:
-            df_gather = df_gather.groupby(graphing_columns).size().reset_index(name='value')
-            column_weights = 'value'
+        column_weights = 'value'
+        df_gather = df_gather.groupby(graphing_columns).size().reset_index(name=column_weights)
+        
+    
     # converting values into strings
     for col in graphing_columns:
         df_gather[col] = df_gather[col].astype('str')
         
     if sorting_algorithm is not None:
-        if verbose:
-            print(f'Sorting Data with sorting algorithm = {sorting_algorithm}')
-        if sorting_algorithm in ['greedy_wolf', 'greedy_wblf']:
-            order_dict = sort_greedy_wolf(df_gather, graphing_columns, fixed_column=fixed_column, 
-                   random_initializations=random_initializations, column_weights = column_weights,
-                   sorting_algorithm = sorting_algorithm, verbose = verbose)
-        else:
-            dist_mat, nodes = generate_distance_matrix(df = df_gather, graphing_columns = graphing_columns, 
-                                     col_weights=column_weights,
-                      matrix_initialization_value = matrix_initialization_value, same_side_matrix_initialization_value = same_side_matrix_initialization_value,
-                              weight_scalar = weight_scalar)
-            if verbose:
-                print(f'Sorting Distance matrix with algorithm {sorting_algorithm}')
-            cycle = sort_dist_matrix(dist_mat, nodes, sorting_algorithm = sorting_algorithm)
-            if verbose:
-                print(f'Determining Optimal Cycle Start')
-            
-            cycle, graphing_columns = determine_optimal_cycle_start(df_gather, cycle, graphing_columns, column_weights=column_weights, 
-                                                                    optimize_column_order = optimize_column_order,
-                                     optimize_column_order_per_cycle = optimize_column_order_per_cycle, cycle_start_positions = cycle_start_positions,
-                                      matrix_initialization_value_column_order = matrix_initialization_value_column_order,
-                                      weight_scalar_column_order = weight_scalar_column_order, 
-                                        column_sorting_metric = column_sorting_metric,column_sorting_algorithm = column_sorting_algorithm,
-                                                                    verbose = verbose
-                                                 )
-            order_dict = get_order_dict(cycle, graphing_columns)
+        graphing_columns, order_dict = data_sort(
+            df=df_gather,
+            graphing_columns=graphing_columns,
+            column_weights=column_weights,
+            sorting_algorithm=sorting_algorithm,
+            optimize_column_order=optimize_column_order,
+            optimize_column_order_per_cycle=optimize_column_order_per_cycle,
+            matrix_initialization_value=matrix_initialization_value,
+            same_side_matrix_initialization_value=same_side_matrix_initialization_value,
+            weight_scalar=weight_scalar,
+            matrix_initialization_value_column_order=matrix_initialization_value_column_order,
+            weight_scalar_column_order=weight_scalar_column_order,
+            column_sorting_metric=column_sorting_metric,
+            column_sorting_algorithm=column_sorting_algorithm,
+            cycle_start_positions=cycle_start_positions,
+            fixed_column=fixed_column,
+            random_initializations=random_initializations,
+            verbose=verbose
+        )
     if verbose:
         print("Plotting Data")
     
@@ -927,4 +978,3 @@ def plot_alluvial(df,
     if return_order_dict:
         return fig, order_dict
     return fig
-    
