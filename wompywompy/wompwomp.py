@@ -7,6 +7,7 @@ import re
 from pyalluvial.alluvial import sigmoid, calc_sigmoid_line
 import matplotlib.pyplot as plt
 from matplotlib.transforms import Bbox
+from matplotlib.collections import PolyCollection
 import itertools
 import warnings
 from python_tsp.exact import solve_tsp_dynamic_programming
@@ -58,46 +59,79 @@ def _plot_alluvium(df, xaxis_names, y_name='value', alluvium=None,
     if objective_calc:
         return df
     
+    # Precompute the fixed, normalized sigmoid ribbon shape once. Every row's curve
+    # is just an affine transform of this (y_left/y_right/height only shift and
+    # scale it), so the whole batch can be built with numpy instead of calling
+    # calc_sigmoid_line() per row.
+    xs_template, raw_sigmoid = calc_sigmoid_line(1 - box_width, 0.0, 1.0)
+
+    # Labels already on the axes (from earlier artists/calls) are checked once here
+    # instead of on every polygon: ax.get_legend_handles_labels() rescans every
+    # artist already drawn, so calling it per-row made this loop O(n^2) in the
+    # number of alluvia.
+    seen_labels = set(ax.get_legend_handles_labels()[1])
+
     # plot alluvium
     for i in range(len(xaxis_names)):
         if i + 1 >= len(xaxis_names):
             break
+
+        y_left = df[f'y_{xaxis_names[i]}'].values
+        y_right = df[f'y_{xaxis_names[i + 1]}'].values
+        height = df[y_name].values
+        color_key = df[alluvium].values
+        n = len(y_left)
+        if n == 0:
+            continue
+
+        xs_row = xs_template + i + box_width / 2  # (P,), same for every row this segment
+        ys_under = y_left[:, None] + (y_right - y_left)[:, None] * raw_sigmoid[None, :]  # (n, P)
+        ys_upper = ys_under + height[:, None]  # (n, P)
+
+        xs_fwd_bwd = np.tile(np.concatenate([xs_row, xs_row[::-1]]) + x_init, (n, 1))  # (n, 2P)
+        ys_fwd_bwd = np.concatenate([ys_under, ys_upper[:, ::-1]], axis=1)  # (n, 2P)
+
+        if invert_xy:
+            verts = np.stack([ys_fwd_bwd, xs_fwd_bwd], axis=-1)  # matches fill_betweenx(y, x1, x2)
         else:
-            for y_left, y_right, height, color_key in zip(
-                df[f'y_{xaxis_names[i]}'].values,
-                df[f'y_{xaxis_names[i + 1]}'].values,
-                df[y_name].values,
-                df[alluvium].values):
-                
-                xs, ys_under = calc_sigmoid_line(1 - box_width, y_left, y_right)
-                xs += i + box_width/2
-                ys_upper = ys_under + height
-                if not objective_calc:
-                    label_key = color_key
-                    if label_key in ax.get_legend_handles_labels()[1]:
-                        label_key = None
-                    if invert_xy:
-                        if all_color_dict is None or not color_alluvium:
-                            ax.fill_betweenx(xs + x_init, ys_under, ys_upper, alpha=alluvial_alpha, color='grey', 
-                                             edgecolor='black', label = label_key,
-                                                linewidth = alluvial_edge_width)
-                        else:
-                            ax.fill_betweenx(xs + x_init, ys_under, ys_upper, alpha=alluvial_alpha, 
-                                                 color=all_color_dict[color_key], 
-                                                 edgecolor=all_color_dict[color_key] if color_alluvium_boundary else 'black', 
-                                                 label = label_key,
-                                                linewidth = alluvial_edge_width)
-                    else:
-                        if all_color_dict is None or not color_alluvium:
-                            ax.fill_between(xs + x_init, ys_under, ys_upper, alpha=alluvial_alpha, color='grey', 
-                                            edgecolor='black', label = label_key,
-                                                linewidth = alluvial_edge_width)
-                        else:
-                            ax.fill_between(xs + x_init, ys_under, ys_upper, alpha=alluvial_alpha, 
-                                                 color=all_color_dict[color_key], 
-                                                 edgecolor=all_color_dict[color_key] if color_alluvium_boundary else 'black', 
-                                                 label = label_key,
-                                                linewidth = alluvial_edge_width)
+            verts = np.stack([xs_fwd_bwd, ys_fwd_bwd], axis=-1)  # matches fill_between(x, y1, y2)
+
+        if all_color_dict is None or not color_alluvium:
+            facecolors = 'grey'
+            edgecolors = 'black'
+        else:
+            facecolors = [all_color_dict[k] for k in color_key]
+            edgecolors = (
+                [all_color_dict[k] for k in color_key]
+                if color_alluvium_boundary
+                else 'black'
+            )
+
+        collection = PolyCollection(
+            list(verts),
+            facecolors=facecolors,
+            edgecolors=edgecolors,
+            alpha=alluvial_alpha,
+            linewidths=alluvial_edge_width,
+        )
+        ax.add_collection(collection, autolim=True)
+
+        # Legend-only proxy artists: one per newly-seen label, each with empty
+        # geometry (no real cost), so the legend still shows exactly one entry
+        # per distinct alluvium/color the first time it appears -- same dedup
+        # behavior as before, just computed once per label instead of per row.
+        for k in pd.unique(color_key):
+            if k in seen_labels:
+                continue
+            seen_labels.add(k)
+            face = all_color_dict[k] if (all_color_dict is not None and color_alluvium) else 'grey'
+            edge = (
+                all_color_dict[k]
+                if (all_color_dict is not None and color_alluvium and color_alluvium_boundary)
+                else 'black'
+            )
+            ax.fill([], [], facecolor=face, edgecolor=edge, alpha=alluvial_alpha,
+                    linewidth=alluvial_edge_width, label=k)
 
 
 

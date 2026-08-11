@@ -153,3 +153,4 @@ logs/
 trash
 tests/baseline
 tests/results
+benchmarks/results
