@@ -3,6 +3,7 @@ import pandas as pd
 import scipy
 from scipy.stats import rankdata
 import igraph
+import numba
 import re
 from pyalluvial.alluvial import sigmoid, calc_sigmoid_line
 import matplotlib.pyplot as plt
@@ -480,32 +481,43 @@ def get_order_dict(cycle, graphing_columns=None):
     return graphs
 
 # calculate_objective.py
-class BIT:
-    def __init__(self, size):
-        self.tree_count = [0] * (size + 1)
-        self.tree_weight = [0.0] * (size + 1)
+@numba.njit(cache=True)
+def _fenwick_crossing_weight(y2_rank, weight, max_rank):
+    """Weighted inversion count: for each row (in y1-sorted order), sums the
+    weight of every earlier row whose y2_rank is strictly greater, via a
+    Fenwick/BIT tree. Numba-jitted since this runs inside determine_optimal_cycle_start's
+    per-rotation search (called dozens of times per sort, each over every alluvium row) --
+    a pure-Python BIT made this the dominant cost for wide/high-cardinality plots.
+    """
+    size = max_rank + 2
+    tree_weight = np.zeros(size + 1, dtype=np.float64)
+    total_cross_weight = 0.0
+    n = y2_rank.shape[0]
+    for i in range(n):
+        r = y2_rank[i]
+        w = weight[i]
 
-    def update(self, index, weight):
-        index += 1
-        while index < len(self.tree_count):
-            self.tree_count[index] += 1
-            self.tree_weight[index] += weight
-            index += index & -index
+        # query_range(r+1, max_rank) = query(max_rank) - query(r)
+        idx = max_rank + 1
+        w1 = 0.0
+        while idx > 0:
+            w1 += tree_weight[idx]
+            idx -= idx & -idx
+        idx = r + 1
+        w2 = 0.0
+        while idx > 0:
+            w2 += tree_weight[idx]
+            idx -= idx & -idx
+        sum_weights_above = w1 - w2
+        total_cross_weight += w * sum_weights_above
 
-    def query(self, index):
-        count = 0
-        weight_sum = 0.0
-        index += 1
-        while index > 0:
-            count += self.tree_count[index]
-            weight_sum += self.tree_weight[index]
-            index -= index & -index
-        return count, weight_sum
+        # update(r, w)
+        idx = r + 1
+        while idx < tree_weight.shape[0]:
+            tree_weight[idx] += w
+            idx += idx & -idx
 
-    def query_range(self, low, high):
-        c1, w1 = self.query(high)
-        c2, w2 = self.query(low - 1)
-        return c1 - c2, w1 - w2
+    return total_cross_weight
 
 def calculate_objective_fenwick(df, y1, y2, weight = 'count'):
     # Step 1: Sort by y1
@@ -515,19 +527,10 @@ def calculate_objective_fenwick(df, y1, y2, weight = 'count'):
     df_sorted['y2_rank'] = rankdata(df_sorted[y2], method='dense').astype(int)
     max_rank = df_sorted['y2_rank'].max()
 
-    # Step 3: Use BIT
-    bit = BIT(size=max_rank + 2)
-    total_cross_weight = 0.0
-
-    for y2_rank, weight in zip(df_sorted['y2_rank'].values, df_sorted[weight].values):
-        # Count previous y2s > current (strictly greater)
-        _, sum_weights_above = bit.query_range(y2_rank + 1, max_rank)
-        total_cross_weight += weight * sum_weights_above
-
-        # Add current y2_rank to BIT
-        bit.update(y2_rank, weight)
-    
-    return total_cross_weight
+    # Step 3: weighted inversion count via a numba-jitted Fenwick tree
+    y2_rank_arr = df_sorted['y2_rank'].to_numpy(dtype=np.int64)
+    weight_arr = df_sorted[weight].to_numpy(dtype=np.float64)
+    return _fenwick_crossing_weight(y2_rank_arr, weight_arr, int(max_rank))
 
 def determine_crossing_edges(df, graphing_columns = None, order_dict = None, col_weights = "value"):
     # converting values into strings
