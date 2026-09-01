@@ -444,7 +444,13 @@ def generate_distance_matrix(df, graphing_columns,
                 full_dist_matrix[final_result['loc2'], final_result['loc1']] = weight_scalar * final_result['total_value']
     
     if nn_normalize:
-         # make sure all numbers are positive for neighbornet
+        # Translate so every entry is positive. This is required by the TSP
+        # path, not by NeighborNet: NeighborNet's selection criterion
+        # q_pq = (r-2)*d_pq - S_p - S_q maps to alpha*q_pq - beta*r under
+        # d -> alpha*d + beta (alpha > 0), the same change for every pair at a
+        # given step, and each agglomeration replaces distances by convex
+        # combinations -- so the cycle is invariant under any increasing affine
+        # transform of the matrix and negative distances are harmless to it.
         min_val_abs = np.abs(np.min(full_dist_matrix))
         full_dist_matrix = full_dist_matrix + (min_val_abs + 1)
         full_dist_matrix[np.isnan(full_dist_matrix)] = 1e6
