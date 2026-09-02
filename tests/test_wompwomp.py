@@ -329,4 +329,7 @@ def test_objective_more_tsp_3layer_unsorted(more_neighbornet_3_layer_df):
 
     num = determine_crossing_edges(df, graphing_columns=graphing_columns, order_dict=order_dict, col_weights="value")
 
-    assert num == 96
+    # Was 96 before the within-stratum ordering in _plot_alluvium was made a
+    # fully-specified total order (current axis, then nearest-right axes, then
+    # nearest-left axes), matching make_lode_df() in the R package. See wompwomp S1.
+    assert num == 77

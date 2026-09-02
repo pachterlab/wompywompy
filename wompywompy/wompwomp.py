@@ -11,7 +11,7 @@ from matplotlib.transforms import Bbox
 from matplotlib.collections import PolyCollection
 import itertools
 import warnings
-from python_tsp.exact import solve_tsp_dynamic_programming
+from python_tsp.heuristics import solve_tsp_local_search
 from sklearn.metrics import adjusted_rand_score
 from typing import Tuple, List
 from splitspy.nnet import nnet_cycle, nnet_splits
@@ -49,14 +49,18 @@ def _plot_alluvium(df, xaxis_names, y_name='value', alluvium=None,
             xaxis_after_ordering += [xaxis]
     df = df.sort_values(xaxis_after_ordering).reset_index(drop=True).reset_index(names='alluvia')
 
-    for xaxis in xaxis_names:
-        if xaxis + '_order' in df.columns:
-            corrected_name = xaxis + '_order'
-            sorting_list = [corrected_name] + [x for x in xaxis_after_ordering if x != corrected_name]
-            df[f'y_{xaxis}'] = df.sort_values(sorting_list)[y_name].cumsum().shift(1).fillna(0)
-        else:
-            sorting_list = [xaxis] + [x for x in xaxis_after_ordering if x != xaxis]
-            df[f'y_{xaxis}'] = df.sort_values(sorting_list)[y_name].cumsum().shift(1).fillna(0)
+    n_axes = len(xaxis_names)
+    for idx, xaxis in enumerate(xaxis_names):
+        # Within each stratum, order alluvia by a fully-specified key so the
+        # layout does not depend on input row order: the current axis, then the
+        # axes to its right (nearest first), then the axes to its left (nearest
+        # first). Ordering by the nearer axes first keeps alluvia that share a
+        # neighbouring stratum together, which lowers the crossing count the
+        # Fenwick sweep reports. Matches make_lode_df() in the R wompwomp package.
+        right_axes = list(range(idx + 1, n_axes))
+        left_axes = list(range(idx - 1, -1, -1))
+        sorting_list = [xaxis_after_ordering[k] for k in [idx] + right_axes + left_axes]
+        df[f'y_{xaxis}'] = df.sort_values(sorting_list, kind='stable')[y_name].cumsum().shift(1).fillna(0)
     if objective_calc:
         return df
     
@@ -222,7 +226,7 @@ def plot_alluvial_internal(df, xaxis_names, y_name, alluvium_column = None, orde
                         y=[i],
                         width=value,
                         left=bottom,
-                        color=color_dict[name] if color_boxes else 'white',
+                        color=(color_dict.get(xtick_label, {}).get(name, 'grey')) if color_boxes else 'white',
                         label = name if include_stratum_legend else None,
                         edgecolor='black',
                         fill=True,
@@ -236,7 +240,7 @@ def plot_alluvial_internal(df, xaxis_names, y_name, alluvium_column = None, orde
                         x=[i],
                         height=value,
                         bottom=bottom,
-                        color=color_dict[name] if color_boxes else 'white',
+                        color=(color_dict.get(xtick_label, {}).get(name, 'grey')) if color_boxes else 'white',
                         label = name if include_stratum_legend else None,
                         edgecolor='black',
                         fill=True,
@@ -249,29 +253,26 @@ def plot_alluvial_internal(df, xaxis_names, y_name, alluvium_column = None, orde
     
     if verbose:
         print('Plotting Alluvia')
+    # Bands keep a single colour, keyed by the reference (alluvium) column; pull
+    # that column's flat {value: rgba} out of the nested color_dict.
     if ignore_continuity:
         for i in range(len(xaxis_names)):
             if i + 1 >= len(xaxis_names):
                 break
             else:
-                if alluvium_column is None:
-                    alluvium_column = xaxis_names[i]
-                    color_val = df[alluvium_column].unique()
-                    color_dict = dict(zip(color_val, list(range(len(color_val)))))
-                
-                agg_cols = list(set([f'{alluvium}'] + xaxis_names[i: i+2]))
+                band_ref = alluvium_column if alluvium_column is not None else xaxis_names[i]
+                agg_cols = list(set([band_ref] + xaxis_names[i: i+2]))
                 df_agg = df.groupby(agg_cols, as_index=False)[y_name].sum()
 
-                
-                _plot_alluvium(df_agg, xaxis_names[i: i+2], y_name, alluvium = alluvium_column, 
+                _plot_alluvium(df_agg, xaxis_names[i: i+2], y_name, alluvium = band_ref,
                                color_alluvium = color_alluvium, color_alluvium_boundary = color_alluvium_boundary,
-                               order_dict=order_dict, all_color_dict = color_dict, ax=ax, x_init=i,
+                               order_dict=order_dict, all_color_dict = color_dict.get(band_ref, {}), ax=ax, x_init=i,
                               invert_xy=invert_xy, alluvial_alpha = alluvial_alpha, alluvial_edge_width = alluvial_edge_width)
-                alluvium = None
     else:
-        _plot_alluvium(df, xaxis_names, y_name, alluvium = alluvium_column, 
+        band_ref = alluvium_column if alluvium_column is not None else xaxis_names[0]
+        _plot_alluvium(df, xaxis_names, y_name, alluvium = alluvium_column,
                        color_alluvium = color_alluvium, color_alluvium_boundary = color_alluvium_boundary,
-                       order_dict=order_dict, all_color_dict = color_dict, ax=ax, x_init=0,
+                       order_dict=order_dict, all_color_dict = color_dict.get(band_ref, {}), ax=ax, x_init=0,
                       invert_xy=invert_xy, alluvial_alpha = alluvial_alpha,
                       box_line_width = box_line_width,box_width = box_width, alluvial_edge_width = alluvial_edge_width)
     
@@ -411,7 +412,9 @@ def generate_distance_matrix(df, graphing_columns,
     
     if matrix_initialization_value != same_side_matrix_initialization_value:
         for col in graphing_columns:
-            col_indices = list(np.where([col in x for x in all_nodes])[0])
+            # Exact layer-prefix match; `col in x` treated e.g. "age" as part of
+            # "age_group~~..." and marked nodes from different layers as same-layer.
+            col_indices = list(np.where([x.startswith(str(col) + '~~') for x in all_nodes])[0])
             for x in col_indices:
                 full_dist_matrix[x, col_indices] = same_side_matrix_initialization_value
                 full_dist_matrix[col_indices, x] = same_side_matrix_initialization_value
@@ -462,7 +465,10 @@ def sort_dist_matrix(full_dist_matrix, all_nodes, sorting_algorithm = "neighborn
         result = neighbor_net(all_nodes, full_dist_matrix) 
         cycle = pd.Series(all_nodes)[result[0]].tolist()
     elif sorting_algorithm == 'tsp':
-        permutation, distance = solve_tsp_dynamic_programming(full_dist_matrix)
+        # 2-opt local search. The exact Held-Karp solver is O(K^2 * 2^K) and is
+        # unreachable for the block-level matrix (K_sum can exceed 100); R's
+        # TSP::solve_TSP is likewise a heuristic (arbitrary insertion + 2-opt).
+        permutation, distance = solve_tsp_local_search(full_dist_matrix)
         cycle = pd.Series(all_nodes)[permutation].tolist()
     else:
         cycle = all_nodes
@@ -556,7 +562,9 @@ def determine_crossing_edges(df, graphing_columns = None, order_dict = None, col
         y2 = 'y_' + graphing_columns[h+1]
         
         objective_val += calculate_objective_fenwick(lode_df, y1, y2, weight=col_weights)
-    return int(objective_val)
+    # Do not truncate to int: with non-integer weights the crossing objective is
+    # fractional (R's compute_crossing_objective() returns a double).
+    return objective_val
 
 def determine_column_order(df_gather, cycle, graphing_columns, column_weights = 'value',
                            matrix_initialization_value_column_order = 1e6, 
@@ -578,10 +586,18 @@ def determine_column_order(df_gather, cycle, graphing_columns, column_weights = 
                                      order_dict = get_order_dict(cycle, [col1, col2]), col_weights = column_weights)
             neighbornet_objective = weight_scalar_column_order * np.log1p(neighbornet_objective)
         elif column_sorting_metric == "ARI":
+            # NOTE: index.repeat() casts the weights to int, so non-integer
+            # weights are silently truncated when expanding rows for the ARI.
             expanded_df = df_gather.loc[df_gather.index.repeat(df_gather[column_weights])]
             neighbornet_objective = adjusted_rand_score(expanded_df[col1], expanded_df[col2])
+            # ARI in [-0.5, 1]; map to a distance in [0, 1.5] where perfect
+            # agreement (ARI = 1) is distance 0.
             neighbornet_objective = 1 - neighbornet_objective
-            neighbornet_objective = weight_scalar_column_order * 50 * neighbornet_objective
+            # The factor 50 rescales the ARI-derived distance (roughly in [0, 1.5])
+            # to a range comparable with the log1p edge-crossing metric above so a
+            # single TSP tolerance works for both.
+            _ARI_DISTANCE_SCALE = 50
+            neighbornet_objective = weight_scalar_column_order * _ARI_DISTANCE_SCALE * neighbornet_objective
         else:
             ValueError(f"{column_sorting_metric} is not a valid option")
             
@@ -591,9 +607,13 @@ def determine_column_order(df_gather, cycle, graphing_columns, column_weights = 
     nodes = graphing_columns
     result = sort_dist_matrix(full_dist_matrix, nodes, sorting_algorithm = column_sorting_algorithm)
     n = len(result)
-    adj_distances = [full_dist_matrix[x, x%(n-1)+1] for x in range(n)]
+    # Index the distance matrix by consecutive entries of the tour (not by raw
+    # position), and wrap the last edge back to the tour's first node.
+    node_pos = {name: i for i, name in enumerate(nodes)}
+    tour_idx = [node_pos[name] for name in result]
+    adj_distances = [full_dist_matrix[tour_idx[i], tour_idx[(i + 1) % n]] for i in range(n)]
     result = rotate_left(result, np.argmax(adj_distances)+1)
-    
+
     return result
 
 
@@ -605,37 +625,44 @@ def determine_optimal_cycle_start(df_gather, cycle, graphing_columns, column_wei
                                  verbose = False):
     neighbornet_objective_minimum = np.inf
     cycle_best = cycle
-    
+    graphing_columns_best = graphing_columns
+
     for i in range(len(cycle)):
         if (cycle_start_positions is not None and (i + 1) not in cycle_start_positions):
             continue
-            
-        # Rotate stratum order and determine neighbornet objective
+
+        # Rotate stratum order. When re-optimizing the column order for every
+        # rotation, do it *before* scoring so the objective reflects the column
+        # order actually paired with this cycle; always evaluate from the same
+        # starting column order so rotations are comparable.
         cycle_shifted = rotate_left(cycle, i)
-        neighbornet_objective = determine_crossing_edges(df_gather, graphing_columns, get_order_dict(cycle_shifted), col_weights=column_weights)
-        
+        if optimize_column_order_per_cycle and optimize_column_order:
+            graphing_columns_i = determine_column_order(df_gather, cycle_shifted, graphing_columns, column_weights = column_weights,
+                           matrix_initialization_value_column_order = matrix_initialization_value_column_order,
+                        weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric,
+                        column_sorting_algorithm = column_sorting_algorithm,
+                                 verbose = verbose)
+        else:
+            graphing_columns_i = graphing_columns
+
+        neighbornet_objective = determine_crossing_edges(df_gather, graphing_columns_i, get_order_dict(cycle_shifted), col_weights=column_weights)
+
         if verbose:
             print(f"neighbornet_objective for iteration {i} = {neighbornet_objective}")
-            
-        # if better, update best cycle and minimum
+
+        # if better, update best cycle, its column order, and the minimum together
         if (neighbornet_objective < neighbornet_objective_minimum):
             neighbornet_objective_minimum = neighbornet_objective
             cycle_best = cycle_shifted
-            
-        if optimize_column_order_per_cycle and optimize_column_order:
-            graphing_columns = determine_column_order(df_gather, cycle_shifted, graphing_columns, column_weights = column_weights,
-                           matrix_initialization_value_column_order = matrix_initialization_value_column_order, 
-                        weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric, 
-                        column_sorting_algorithm = column_sorting_algorithm, 
-                                 verbose = verbose)
-                    
+            graphing_columns_best = graphing_columns_i
+
     if optimize_column_order and not optimize_column_order_per_cycle:
-        graphing_columns = determine_column_order(df_gather, cycle_best, graphing_columns, column_weights = column_weights,
-                           matrix_initialization_value_column_order = matrix_initialization_value_column_order, 
-                        weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric, 
-                        column_sorting_algorithm = column_sorting_algorithm, 
+        graphing_columns_best = determine_column_order(df_gather, cycle_best, graphing_columns, column_weights = column_weights,
+                           matrix_initialization_value_column_order = matrix_initialization_value_column_order,
+                        weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric,
+                        column_sorting_algorithm = column_sorting_algorithm,
                                  verbose = verbose)
-    return cycle_best, graphing_columns
+    return cycle_best, graphing_columns_best
 
 
 def sort_clusters_by_agreement(df_gather, order_dict, fixed_column, reordered_column, column_weights = 'value'):
@@ -715,84 +742,56 @@ def find_colors_advanced(df_gather, graphing_columns, column_weights = 'value',
     g.vs['name'] = nodes
     if coloring_algorithm_advanced_option == 'louvain':
         partition = g.community_multilevel(weights = g.es['weight'], resolution = resolution)
-        mem_df = pd.DataFrame({'node' : pd.Series(nodes).str.split('~~', expand=True)[1],
-                     'membership' : partition.membership})
     elif coloring_algorithm_advanced_option == 'leiden':
         partition = g.community_leiden(weights = g.es['weight'], resolution = resolution)
-        mem_df = pd.DataFrame({'node' : pd.Series(nodes).str.split('~~', expand=True)[1],
-                     'membership' : partition.membership})
-    mem_dict = mem_df.set_index('node').to_dict()['membership']
-    return mem_dict
+
+    # Return a per-layer map {col: {value: community}}. A stratum label may occur
+    # in more than one layer and land in different communities; keeping the layer
+    # in the key lets it take a different colour in each (matching the R package).
+    parts = pd.Series(nodes).str.split('~~', n=1, expand=True)
+    mem_df = pd.DataFrame({'col': parts[0], 'value': parts[1],
+                           'membership': partition.membership})
+    return {col: dict(zip(sub['value'], sub['membership']))
+            for col, sub in mem_df.groupby('col')}
+
+def _propagate_reference_colors(df_gather, column_weights, threshold, ref_col, order):
+    """Colour ``ref_col`` with distinct memberships, then walk ``order`` (a list of
+    (child, parent) pairs), giving each child block the membership of the
+    parent-col block whose parent score (fraction of the child's weight) exceeds
+    ``threshold``, or a fresh membership otherwise. Returns {col: {value: membership}}."""
+    out = {}
+    next_id = 0
+    ref_vals = df_gather[ref_col].astype('str').unique().tolist()
+    out[ref_col] = {v: i for i, v in enumerate(ref_vals)}
+    next_id = len(ref_vals)
+    for child, parent in order:
+        out.setdefault(child, {})
+        agg = (df_gather[[parent, child, column_weights]].astype({parent: 'str', child: 'str'})
+               .groupby([child, parent], as_index=False)[column_weights].sum())
+        agg['frac'] = agg.groupby(child)[column_weights].transform(lambda s: s / s.sum())
+        for cval, sub in agg.groupby(child):
+            best = sub.loc[sub[column_weights].idxmax()]
+            if best['frac'] > threshold and best[parent] in out.get(parent, {}):
+                out[child][cval] = out[parent][best[parent]]
+            else:
+                out[child][cval] = next_id
+                next_id += 1
+    return out
+
 
 def find_colors_reference(df_gather, graphing_columns, column_weights = 'value', reference = 'left', threshold = .5):
     if reference == 'left':
-        for x in range(len(graphing_columns)-1):
-            col1 = graphing_columns[x]
-            col2 = graphing_columns[x+1]
-                
-            if x == 0:
-                mem_df = pd.DataFrame({'node' : list(df_gather[col1].astype('str').unique())})
-                mem_df['membership'] = range(mem_df.shape[0])
-                
-            df_temp = df_gather[[col1, col2, column_weights]].copy()
-            df_temp = df_temp.groupby([col2, col1]).sum().reset_index()
-            df_small = df_temp[df_temp.groupby([col2])[column_weights].transform(lambda x: x/sum(x)) >  threshold]
-            df_small = df_small.astype('str')
-            df_small = pd.merge(df_small, mem_df, left_on = col1, right_on = 'node')[[col2, 'membership']]
-            df_small.columns = ['node', 'membership']
-            
-            for x in list(df_temp[col2].astype('str').unique()):
-                if x not in df_small.node.values:
-                    missing_df = pd.DataFrame({'node':[x],'membership':[np.max(mem_df.membership)+1]})
-                    mem_df = pd.concat([mem_df, missing_df])
-            mem_df = pd.concat([mem_df, df_small])
-            mem_df['node'] = mem_df['node'].astype('str')
+        ref_col = graphing_columns[0]
+        order = [(graphing_columns[i + 1], graphing_columns[i])
+                 for i in range(len(graphing_columns) - 1)]
     elif reference == 'right':
-        First = True
-        for x in range(len(graphing_columns)-1)[::-1]:
-            col1 = graphing_columns[x+1]
-            col2 = graphing_columns[x]
-                
-            if First:
-                mem_df = pd.DataFrame({'node' : list(df_gather[col1].astype('str').unique())})
-                mem_df['membership'] = range(mem_df.shape[0])
-                First = False
-                
-            df_temp = df_gather[[col1, col2, column_weights]].copy()
-            df_temp = df_temp.groupby([col2, col1]).sum().reset_index()
-            df_small = df_temp[df_temp.groupby([col2])[column_weights].transform(lambda x: x/sum(x)) >  threshold]
-            df_small = df_small.astype('str')
-            df_small = pd.merge(df_small, mem_df, left_on = col1, right_on = 'node')[[col2, 'membership']]
-            df_small.columns = ['node', 'membership']
-            
-            for x in list(df_temp[col2].astype('str').unique()):
-                if x not in df_small.node.values:
-                    missing_df = pd.DataFrame({'node':[x],'membership':[np.max(mem_df.membership)+1]})
-                    mem_df = pd.concat([mem_df, missing_df])
-            mem_df = pd.concat([mem_df, df_small])
-            mem_df['node'] = mem_df['node'].astype('str')
-    else:  
-        col1 = reference
-        mem_df = pd.DataFrame({'node' : list(df_gather[col1].astype('str').unique())})
-        mem_df['membership'] = range(mem_df.shape[0])
-        for x in graphing_columns:
-            if x != reference:
-                col2 = x          
-                df_temp = df_gather[[col1, col2, column_weights]].copy()
-                df_temp = df_temp.groupby([col2, col1]).sum().reset_index()
-                df_small = df_temp[df_temp.groupby([col2])[column_weights].transform(lambda x: x/sum(x)) >  threshold]
-                df_small = df_small.astype('str')
-                df_small = pd.merge(df_small, mem_df, left_on = col1, right_on = 'node')[[col2, 'membership']]
-                df_small.columns = ['node', 'membership']
-                
-                for x in list(df_temp[col2].astype('str').unique()):
-                    if x not in df_small.node.values:
-                        missing_df = pd.DataFrame({'node':[x],'membership':[np.max(mem_df.membership)+1]})
-                        mem_df = pd.concat([mem_df, missing_df])
-                mem_df = pd.concat([mem_df, df_small])
-                mem_df['node'] = mem_df['node'].astype('str')
-    mem_dict = mem_df.set_index('node').to_dict()['membership']
-    return mem_dict
+        ref_col = graphing_columns[-1]
+        order = [(graphing_columns[i], graphing_columns[i + 1])
+                 for i in range(len(graphing_columns) - 2, -1, -1)]
+    else:
+        ref_col = reference
+        order = [(c, reference) for c in graphing_columns if c != reference]
+    return _propagate_reference_colors(df_gather, column_weights, threshold, ref_col, order)
 
 def generate_matched_color_dict(df_gather, graphing_columns, column_weights = 'value', 
                  coloring_algorithm = 'advanced', coloring_algorithm_advanced_option = 'leiden', resolution = 1,
@@ -802,19 +801,19 @@ def generate_matched_color_dict(df_gather, graphing_columns, column_weights = 'v
                         coloring_algorithm_advanced_option = coloring_algorithm_advanced_option, resolution = resolution)
     else:
         group_dict = find_colors_reference(df_gather, graphing_columns, column_weights = column_weights, reference = coloring_algorithm,
-                                          threshold = threshold)   
+                                          threshold = threshold)
 
-    cmap = plt.get_cmap(name=cmap_name, lut=len(np.unique(list(group_dict.values()))))
-    available_colors = cmap(np.arange(0,cmap.N))
-
-    color_dict = {}
-    for key in group_dict.keys():
-        color_dict[key] = available_colors[group_dict[key]]
-    return color_dict
+    # group_dict is {col: {value: community}}; map communities to one shared
+    # palette so a community keeps its colour across layers.
+    all_ids = sorted({m for d in group_dict.values() for m in d.values()})
+    cmap = plt.get_cmap(name=cmap_name, lut=max(len(all_ids), 1))
+    available_colors = cmap(np.arange(0, cmap.N))
+    id_to_color = {mid: available_colors[i % len(available_colors)] for i, mid in enumerate(all_ids)}
+    return {col: {v: id_to_color[m] for v, m in d.items()} for col, d in group_dict.items()}
 
 def assign_colors(df_gather, graphing_columns, alluvium_column, match_colors = False, color_dict = None, column_weights = 'value', 
              coloring_algorithm = 'advanced', coloring_algorithm_advanced_option = 'leiden', 
-                              resolution = 1, cmap_name = 'tab_20', fill_missing_colors = True):
+                              resolution = 1, cmap_name = 'tab20', fill_missing_colors = True):
     # generate temporary color dictionary for matching
     tmp_color_dict = {}
     if match_colors:
@@ -822,32 +821,39 @@ def assign_colors(df_gather, graphing_columns, alluvium_column, match_colors = F
              coloring_algorithm = coloring_algorithm, coloring_algorithm_advanced_option = coloring_algorithm_advanced_option, 
                               resolution = resolution, cmap_name = cmap_name)
         
-    # if matching and user defined, override colors
+    # color_dict is nested {col: {value: rgba}}. A flat user-supplied {value: rgba}
+    # is expanded to apply to that value in every column (back-compat).
+    fill_cols = list(graphing_columns)
+    if alluvium_column is not None and alluvium_column not in fill_cols:
+        fill_cols.append(alluvium_column)
+
     if color_dict is None:
-        color_dict = {}
+        user = {}
+    elif color_dict and not isinstance(next(iter(color_dict.values())), dict):
+        user = {c: dict(color_dict) for c in fill_cols}
     else:
-        if match_colors:
-            print("Overriding Auto-generated Colors with User Defined Ones")
-        for x in set(color_dict.keys()).intersection(set(tmp_color_dict.keys())):
-            tmp_color_dict[x] = color_dict[x]
-    color_dict = color_dict | tmp_color_dict
+        user = {c: dict(d) for c, d in color_dict.items()}
+    if user and match_colors:
+        print("Overriding Auto-generated Colors with User Defined Ones")
 
-    # generate list of objects that need colors
-    if alluvium_column in graphing_columns or alluvium_column is None:
-        keys = pd.melt(df_gather[graphing_columns])['value'].unique().tolist()
-    else:
-        keys = pd.melt(df_gather[graphing_columns+ [alluvium_column]])['value'].unique().tolist()
+    # auto colors first, then user overrides on top
+    color_dict = {}
+    for col in set(list(tmp_color_dict.keys()) + list(user.keys())):
+        merged = dict(tmp_color_dict.get(col, {}))
+        merged.update(user.get(col, {}))
+        color_dict[col] = merged
 
-    # randomly assign colors to unmapped objects
-    if len(color_dict.keys()) < len(keys):
-        cmap = plt.get_cmap(name=cmap_name, lut=len(keys))
-        available_colors = cmap(np.arange(0,cmap.N)) 
-        for index, key in enumerate(keys):
-            if key not in color_dict.keys():
-                if fill_missing_colors == True:
-                    color_dict[key] = available_colors[index]
-                else:
-                    color_dict[key] = fill_missing_colors
+    # fill any (col, value) still missing a color
+    for col in fill_cols:
+        col_map = color_dict.setdefault(col, {})
+        vals = df_gather[col].astype(str).unique().tolist()
+        if any(v not in col_map for v in vals):
+            cmap = plt.get_cmap(name=cmap_name, lut=max(len(vals), 1))
+            available_colors = cmap(np.arange(0, cmap.N))
+            for index, v in enumerate(vals):
+                if v not in col_map:
+                    col_map[v] = available_colors[index % len(available_colors)] \
+                        if fill_missing_colors is True else fill_missing_colors
     return color_dict
 
 def data_sort(
