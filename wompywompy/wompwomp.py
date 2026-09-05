@@ -402,7 +402,7 @@ def neighbor_net(labels: List[str], mat: List[List[float]], cutoff=0.0001, const
 
 def generate_distance_matrix(df, graphing_columns,
                     col_weights = 'value', matrix_initialization_value = 1e6, same_side_matrix_initialization_value = 1e6, 
-                     weight_scalar = 5e5, nn_normalize = True):
+                     weight_scalar = 5e5, nn_normalize = True, sorting_algorithm = 'neighbornet'):
 
     matrix_df = df[graphing_columns].astype(str).apply(lambda x : x.name+'~~'+x)
     matrix_df[col_weights] = df[col_weights]
@@ -447,15 +447,14 @@ def generate_distance_matrix(df, graphing_columns,
                 full_dist_matrix[final_result['loc2'], final_result['loc1']] = weight_scalar * final_result['total_value']
     
     if nn_normalize:
-        # Translate so every entry is positive. This is required by the TSP
-        # path, not by NeighborNet: NeighborNet's selection criterion
-        # q_pq = (r-2)*d_pq - S_p - S_q maps to alpha*q_pq - beta*r under
-        # d -> alpha*d + beta (alpha > 0), the same change for every pair at a
-        # given step, and each agglomeration replaces distances by convex
-        # combinations -- so the cycle is invariant under any increasing affine
-        # transform of the matrix and negative distances are harmless to it.
-        min_val_abs = np.abs(np.min(full_dist_matrix))
-        full_dist_matrix = full_dist_matrix + (min_val_abs + 1)
+        # Translate so every entry is positive, but only for `tsp`. The TSP
+        # solver needs it, and a tour visits the same number of edges whichever
+        # order it takes, so adding a constant leaves the shortest tour
+        # unchanged. NeighborNet accepts negative distances and its cycle is
+        # NOT invariant under translation, so its matrix is left untouched.
+        if sorting_algorithm == 'tsp':
+            min_val_abs = np.abs(np.min(full_dist_matrix))
+            full_dist_matrix = full_dist_matrix + (min_val_abs + 1)
         full_dist_matrix[np.isnan(full_dist_matrix)] = 1e6
     
     return full_dist_matrix, all_nodes
@@ -893,7 +892,7 @@ def data_sort(
         dist_mat, nodes = generate_distance_matrix(df = df, graphing_columns = graphing_columns, 
                                      col_weights=column_weights,
                       matrix_initialization_value = matrix_initialization_value, same_side_matrix_initialization_value = same_side_matrix_initialization_value,
-                              weight_scalar = weight_scalar)
+                              weight_scalar = weight_scalar, sorting_algorithm = sorting_algorithm)
         if verbose:
             print(f'Sorting Distance matrix with algorithm {sorting_algorithm}')
         cycle = sort_dist_matrix(dist_mat, nodes, sorting_algorithm = sorting_algorithm)
