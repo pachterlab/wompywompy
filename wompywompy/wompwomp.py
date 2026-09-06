@@ -408,7 +408,11 @@ def generate_distance_matrix(df, graphing_columns,
     matrix_df[col_weights] = df[col_weights]
     all_nodes = pd.melt(matrix_df[graphing_columns])['value'].unique().tolist()
     
-    full_dist_matrix = np.full((len(all_nodes),len(all_nodes)), matrix_initialization_value)
+    # float64 explicitly: np.full(..., 0) would give an int array, silently
+    # truncating fractional co-occurrence weights (find_colors_advanced()
+    # calls this with matrix_initialization_value=0).
+    full_dist_matrix = np.full((len(all_nodes), len(all_nodes)),
+                               matrix_initialization_value, dtype=np.float64)
     
     if matrix_initialization_value != same_side_matrix_initialization_value:
         for col in graphing_columns:
@@ -626,23 +630,27 @@ def determine_optimal_cycle_start(df_gather, cycle, graphing_columns, column_wei
     cycle_best = cycle
     graphing_columns_best = graphing_columns
 
+    # Layer order used to score rotations. With optimize_column_order_per_cycle
+    # it is recomputed for every rotation; otherwise it is computed once, on the
+    # FIRST rotation, and then reused to score all of them -- so every rotation
+    # is compared under the same layer order, and the reported objective is the
+    # one the returned (cycle, layer order) pair actually achieves. Computing it
+    # after the loop instead would score every rotation under the caller's
+    # incoming order and then swap the layers out from under the winner.
+    # Matches determine_optimal_cycle_start() in the R package and Algorithm 1.
+    graphing_columns_i = graphing_columns
+
     for i in range(len(cycle)):
         if (cycle_start_positions is not None and (i + 1) not in cycle_start_positions):
             continue
 
-        # Rotate stratum order. When re-optimizing the column order for every
-        # rotation, do it *before* scoring so the objective reflects the column
-        # order actually paired with this cycle; always evaluate from the same
-        # starting column order so rotations are comparable.
         cycle_shifted = rotate_left(cycle, i)
-        if optimize_column_order_per_cycle and optimize_column_order:
+        if optimize_column_order and (optimize_column_order_per_cycle or i == 0):
             graphing_columns_i = determine_column_order(df_gather, cycle_shifted, graphing_columns, column_weights = column_weights,
                            matrix_initialization_value_column_order = matrix_initialization_value_column_order,
                         weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric,
                         column_sorting_algorithm = column_sorting_algorithm,
                                  verbose = verbose)
-        else:
-            graphing_columns_i = graphing_columns
 
         neighbornet_objective = determine_crossing_edges(df_gather, graphing_columns_i, get_order_dict(cycle_shifted), col_weights=column_weights)
 
@@ -655,12 +663,6 @@ def determine_optimal_cycle_start(df_gather, cycle, graphing_columns, column_wei
             cycle_best = cycle_shifted
             graphing_columns_best = graphing_columns_i
 
-    if optimize_column_order and not optimize_column_order_per_cycle:
-        graphing_columns_best = determine_column_order(df_gather, cycle_best, graphing_columns, column_weights = column_weights,
-                           matrix_initialization_value_column_order = matrix_initialization_value_column_order,
-                        weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric,
-                        column_sorting_algorithm = column_sorting_algorithm,
-                                 verbose = verbose)
     return cycle_best, graphing_columns_best
 
 
@@ -739,10 +741,16 @@ def find_colors_advanced(df_gather, graphing_columns, column_weights = 'value',
                      weight_scalar = 1, nn_normalize = False)
     g = igraph.Graph.Weighted_Adjacency(dist_mat, mode = 'undirected')
     g.vs['name'] = nodes
+    # Both branches maximize modularity. community_leiden() defaults to
+    # objective_function="CPM", whose quality function compares edge weights
+    # directly against `resolution`, so the partition would depend on the units
+    # the co-occurrence weights happen to be in. Modularity normalizes by total
+    # edge weight, matching R's find_colors_advanced() and the manuscript.
     if coloring_algorithm_advanced_option == 'louvain':
         partition = g.community_multilevel(weights = g.es['weight'], resolution = resolution)
     elif coloring_algorithm_advanced_option == 'leiden':
-        partition = g.community_leiden(weights = g.es['weight'], resolution = resolution)
+        partition = g.community_leiden(weights = g.es['weight'], resolution = resolution,
+                                       objective_function = 'modularity')
 
     # Return a per-layer map {col: {value: community}}. A stratum label may occur
     # in more than one layer and land in different communities; keeping the layer
@@ -791,6 +799,71 @@ def find_colors_reference(df_gather, graphing_columns, column_weights = 'value',
         ref_col = reference
         order = [(c, reference) for c in graphing_columns if c != reference]
     return _propagate_reference_colors(df_gather, column_weights, threshold, ref_col, order)
+
+def compute_color_agreement(df_gather, graphing_columns, group_dict, column_weights='value',
+                            adjacent_only=False):
+    """W_LOMP color-agreement objective M for a stratum colouring.
+
+    Writing W_{bb'}^(i,j) for the co-occurrence weight of block b of layer i and
+    block b' of layer j, and c^(i) for the colour assigned to layer i's blocks,
+
+        M = sum_{i<j} sum_{b,b'} delta(c^(i)(b), c^(j)(b')) * W_{bb'}^(i,j)
+
+    The sum runs over every unordered pair of layers, matching the graph that
+    find_colors_advanced() clusters (which also uses every pair, not just
+    adjacent ones). Pass adjacent_only=True to restrict it to the m-1 pairs
+    that are actually drawn side by side.
+
+    M is a diagnostic, not something the colouring maximizes: colours may repeat
+    within a layer, so M is maximized trivially by painting every block the same
+    colour. It is reported so two colourings of the same data can be compared.
+
+    Parameters
+    ----------
+    df_gather : pandas.DataFrame
+        One row per alluvium, with a column per layer and a weight column.
+    graphing_columns : list of str
+        The layer columns, in plot order.
+    group_dict : dict
+        {column: {stratum value: community id}} -- e.g. the output of
+        find_colors_advanced() or find_colors_reference().
+    column_weights : str
+        Name of the weight column.
+    adjacent_only : bool
+        Sum over adjacent layer pairs only.
+
+    Returns
+    -------
+    (float, pandas.DataFrame)
+        The scalar M, and one row per layer pair with its contribution.
+    """
+    if len(graphing_columns) < 2:
+        raise ValueError("At least two graphing columns are required.")
+    missing = [c for c in graphing_columns if c not in group_dict]
+    if missing:
+        raise ValueError(f"group_dict has no entry for column(s): {missing}")
+
+    weights = df_gather[column_weights].to_numpy(dtype=np.float64)
+    # Colour of the block each row passes through, per layer. An unmapped
+    # stratum maps to NaN, which never compares equal (delta = 0).
+    colors = {c: df_gather[c].astype(str).map(group_dict[c]).to_numpy()
+              for c in graphing_columns}
+
+    if adjacent_only:
+        pairs = list(zip(graphing_columns[:-1], graphing_columns[1:]))
+    else:
+        pairs = list(itertools.combinations(graphing_columns, 2))
+
+    rows = []
+    for ci, cj in pairs:
+        a, b = colors[ci], colors[cj]
+        same = pd.notna(a) & pd.notna(b) & (a == b)
+        rows.append({'layer1': ci, 'layer2': cj,
+                     'color_agreement': float(weights[same].sum()),
+                     'total_weight': float(weights.sum())})
+    per_pair = pd.DataFrame(rows)
+    return float(per_pair['color_agreement'].sum()), per_pair
+
 
 def generate_matched_color_dict(df_gather, graphing_columns, column_weights = 'value', 
                  coloring_algorithm = 'advanced', coloring_algorithm_advanced_option = 'leiden', resolution = 1,

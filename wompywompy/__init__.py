@@ -1,6 +1,6 @@
 """cellmender package initialization module."""
 
-from .wompwomp import plot_alluvial
+from .wompwomp import plot_alluvial, data_sort, compute_color_agreement, determine_crossing_edges
 # from .utils import *  # only imports what is in __all__ in .utils/__init__.py
 
 __version__ = "0.1.0"
