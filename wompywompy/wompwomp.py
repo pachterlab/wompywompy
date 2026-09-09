@@ -928,6 +928,22 @@ def assign_colors(df_gather, graphing_columns, alluvium_column, match_colors = F
                         if fill_missing_colors is True else fill_missing_colors
     return color_dict
 
+def _resolve_distance_constants(alpha, beta, weight_scalar, matrix_initialization_value,
+                                same_side_matrix_initialization_value):
+    """Turn the user-facing ratios (alpha, beta) into the matrix constants
+    (d_max, d_same), unless the constants were given explicitly."""
+    if beta is None:
+        beta = alpha
+    for name, val in (("alpha", alpha), ("beta", beta), ("weight_scalar", weight_scalar)):
+        if not np.isfinite(val) or val <= 0:
+            raise ValueError(f"`{name}` must be a positive number, got {val!r}")
+    if matrix_initialization_value is None:
+        matrix_initialization_value = alpha * weight_scalar
+    if same_side_matrix_initialization_value is None:
+        same_side_matrix_initialization_value = beta * weight_scalar
+    return matrix_initialization_value, same_side_matrix_initialization_value
+
+
 def data_sort(
         df,
         graphing_columns,
@@ -935,9 +951,11 @@ def data_sort(
         sorting_algorithm="neighbornet",
         optimize_column_order=True,
         optimize_column_order_per_cycle=False,
-        matrix_initialization_value=1e6,
-        same_side_matrix_initialization_value=1e6,
+        alpha=2.0,
+        beta=None,
         weight_scalar=5e5,
+        matrix_initialization_value=None,
+        same_side_matrix_initialization_value=None,
         matrix_initialization_value_column_order=1e6,
         weight_scalar_column_order=1,
         column_sorting_metric="edge_crossing",
@@ -950,6 +968,15 @@ def data_sort(
     if column_weights is None:
         column_weights = 'value'
         df = df.groupby(graphing_columns).size().reset_index(name=column_weights)
+
+    # The block distance matrix has three constants -- c = weight_scalar,
+    # d_max = matrix_initialization_value, d_same = same_side_matrix_initialization_value --
+    # but the NeighborNet/TSP cycle is invariant under rescaling the whole matrix,
+    # so it depends on them only through the ratios d_max / c (alpha) and
+    # d_same / c (beta). Those ratios are the user-facing parameters; the constants
+    # are advanced overrides (None = derive from alpha / beta).
+    matrix_initialization_value, same_side_matrix_initialization_value = _resolve_distance_constants(
+        alpha, beta, weight_scalar, matrix_initialization_value, same_side_matrix_initialization_value)
 
     # converting values into strings
     for col in graphing_columns:
@@ -991,8 +1018,10 @@ def plot_alluvial(df,
                   sorting_algorithm = 'neighbornet', 
                   # neighbornet-specific arguments
                   optimize_column_order = True, optimize_column_order_per_cycle = False,
-                  matrix_initialization_value = 1e6, same_side_matrix_initialization_value = 1e6,
-                  weight_scalar = 5e5, 
+                  alpha = 2.0, beta = None,
+                  # advanced: absolute constants of the distance matrix (None = derived from alpha / beta)
+                  weight_scalar = 5e5, matrix_initialization_value = None, same_side_matrix_initialization_value = None,
+                  
                   # column order optimizaiton arguments
                   matrix_initialization_value_column_order = 1e6,
                   weight_scalar_column_order = 1, column_sorting_metric = "edge_crossing",column_sorting_algorithm = "tsp", 
@@ -1057,9 +1086,11 @@ def plot_alluvial(df,
             sorting_algorithm=sorting_algorithm,
             optimize_column_order=optimize_column_order,
             optimize_column_order_per_cycle=optimize_column_order_per_cycle,
+            alpha=alpha,
+            beta=beta,
+            weight_scalar=weight_scalar,
             matrix_initialization_value=matrix_initialization_value,
             same_side_matrix_initialization_value=same_side_matrix_initialization_value,
-            weight_scalar=weight_scalar,
             matrix_initialization_value_column_order=matrix_initialization_value_column_order,
             weight_scalar_column_order=weight_scalar_column_order,
             column_sorting_metric=column_sorting_metric,

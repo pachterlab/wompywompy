@@ -89,22 +89,34 @@ def main():  # noqa: C901
         help="Run column optimization every cycle in neighbornet."
     )
     parser_plot_alluvial.add_argument(
-        "--matrix_initialization_value",
+        "--alpha",
         type=float,
-        default=1e6,
-        help="Distance matrix initialization value for neighbornet."
+        default=2.0,
+        help="Ratio between the distance given to blocks in different axes that share no observations and the scale of the -log(edge weight) distances (default 2)."
     )
     parser_plot_alluvial.add_argument(
-        "--same_side_matrix_initialization_value",
+        "--beta",
         type=float,
-        default=1e6,
-        help="Initialization value for same-side distances."
+        default=None,
+        help="Ratio between the distance given to distinct blocks of the same axis and the scale of the -log(edge weight) distances (default: same as --alpha)."
     )
     parser_plot_alluvial.add_argument(
         "--weight_scalar",
         type=float,
         default=5e5,
-        help="Weight multiplier for distance updates in neighbornet."
+        help="Advanced. Absolute scale of the distance matrix; the cycle depends only on --alpha and --beta."
+    )
+    parser_plot_alluvial.add_argument(
+        "--matrix_initialization_value",
+        type=float,
+        default=None,
+        help="Advanced. Overrides --alpha with an absolute distance for unconnected blocks in different axes."
+    )
+    parser_plot_alluvial.add_argument(
+        "--same_side_matrix_initialization_value",
+        type=float,
+        default=None,
+        help="Advanced. Overrides --beta with an absolute distance for blocks of the same axis."
     )
 
     # ---------- Column Order Optimization ----------
@@ -412,6 +424,8 @@ def main():  # noqa: C901
             sorting_algorithm=args.sorting_algorithm,
             optimize_column_order=args.optimize_column_order,
             optimize_column_order_per_cycle=args.optimize_column_order_per_cycle,
+            alpha=args.alpha,
+            beta=args.beta,
             matrix_initialization_value=args.matrix_initialization_value,
             same_side_matrix_initialization_value=args.same_side_matrix_initialization_value,
             weight_scalar=args.weight_scalar,
