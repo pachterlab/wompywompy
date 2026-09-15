@@ -10,7 +10,7 @@ DEFAULT_SWEEP = {
     "n_rows": [1_000, 10_000, 100_000],
     "n_columns": [2, 3, 4],
     "n_categories": [4, 8, 16],
-    "sorting_algorithm": ["neighbornet", "greedy_wblf"],
+    "sorting_algorithm": ["neighbornet", "greedy", "barycenter", "median"],
     "optimize_column_order": [True, False],
 }
 
@@ -26,7 +26,7 @@ SMOKE_SWEEP = {
     "n_rows": [500],
     "n_columns": [2],
     "n_categories": [4],
-    "sorting_algorithm": ["neighbornet", "greedy_wblf"],
+    "sorting_algorithm": ["neighbornet", "greedy", "barycenter", "median"],
     "optimize_column_order": [False],
 }
 

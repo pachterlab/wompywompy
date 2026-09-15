@@ -402,7 +402,8 @@ def neighbor_net(labels: List[str], mat: List[List[float]], cutoff=0.0001, const
 
 def generate_distance_matrix(df, graphing_columns,
                     col_weights = 'value', matrix_initialization_value = 1e6, same_side_matrix_initialization_value = 1e6, 
-                     weight_scalar = 5e5, nn_normalize = True, sorting_algorithm = 'neighbornet'):
+                     weight_scalar = 5e5, nn_normalize = True, sorting_algorithm = 'neighbornet',
+                     fixed_orders = None, fixed_order_bias = 10):
 
     matrix_df = df[graphing_columns].astype(str).apply(lambda x : x.name+'~~'+x)
     matrix_df[col_weights] = df[col_weights]
@@ -422,6 +423,18 @@ def generate_distance_matrix(df, graphing_columns,
             for x in col_indices:
                 full_dist_matrix[x, col_indices] = same_side_matrix_initialization_value
                 full_dist_matrix[col_indices, x] = same_side_matrix_initialization_value
+    # Within a fixed axis, grow the same-side distance with the gap between two
+    # blocks' fixed positions, so the cycle tends to visit them in that order.
+    # A ramp of 10 * weight_scalar gave the fewest crossings on synthetic
+    # clustered data (see the R package's run_neighbornet()).
+    node_index = {node: i for i, node in enumerate(all_nodes)}
+    for col, order in (fixed_orders or {}).items():
+        n_fixed = len(order)
+        if n_fixed > 1 and fixed_order_bias > 0:
+            idx = np.array([node_index[f'{col}~~{v}'] for v in order])
+            gaps = np.abs(np.subtract.outer(np.arange(n_fixed), np.arange(n_fixed))) / (n_fixed - 1)
+            full_dist_matrix[np.ix_(idx, idx)] = same_side_matrix_initialization_value + fixed_order_bias * weight_scalar * gaps
+
     pairwise_groupings = list(itertools.combinations(graphing_columns, 2))
     
     results = []
@@ -569,7 +582,7 @@ def determine_crossing_edges(df, graphing_columns = None, order_dict = None, col
     # fractional (R's compute_crossing_objective() returns a double).
     return objective_val
 
-def determine_column_order(df_gather, cycle, graphing_columns, column_weights = 'value',
+def determine_column_order(df_gather, order_dict, graphing_columns, column_weights = 'value',
                            matrix_initialization_value_column_order = 1e6, 
                         weight_scalar_column_order = 1, column_sorting_metric = "edge_crossing", 
                         column_sorting_algorithm = "tsp", 
@@ -586,7 +599,7 @@ def determine_column_order(df_gather, cycle, graphing_columns, column_weights = 
 
         if column_sorting_metric == "edge_crossing":
             neighbornet_objective = determine_crossing_edges(df_gather, graphing_columns = [col1, col2], 
-                                     order_dict = get_order_dict(cycle, [col1, col2]), col_weights = column_weights)
+                                     order_dict = {col1: order_dict[col1], col2: order_dict[col2]}, col_weights = column_weights)
             neighbornet_objective = weight_scalar_column_order * np.log1p(neighbornet_objective)
         elif column_sorting_metric == "ARI":
             # NOTE: index.repeat() casts the weights to int, so non-integer
@@ -625,7 +638,8 @@ def determine_optimal_cycle_start(df_gather, cycle, graphing_columns, column_wei
                                   matrix_initialization_value_column_order = 1e6, 
                         weight_scalar_column_order = 1, column_sorting_metric = "edge_crossing", 
                         column_sorting_algorithm = "neighbornet", 
-                                 verbose = False):
+                                 verbose = False, fixed_orders = None):
+    fixed_orders = fixed_orders or {}
     neighbornet_objective_minimum = np.inf
     cycle_best = cycle
     graphing_columns_best = graphing_columns
@@ -640,98 +654,241 @@ def determine_optimal_cycle_start(df_gather, cycle, graphing_columns, column_wei
     # Matches determine_optimal_cycle_start() in the R package and Algorithm 1.
     graphing_columns_i = graphing_columns
 
-    for i in range(len(cycle)):
-        if (cycle_start_positions is not None and (i + 1) not in cycle_start_positions):
-            continue
+    # A fixed axis keeps its given order whatever the cycle says, so reversing
+    # the cycle is no longer equivalent to flipping the plot; try both directions.
+    orientations = [cycle, cycle[::-1]] if fixed_orders else [cycle]
+    order_dict_best = None
+    for orientation, oriented_cycle in enumerate(orientations):
+        for i in range(len(oriented_cycle)):
+            if (cycle_start_positions is not None and (i + 1) not in cycle_start_positions):
+                continue
 
-        cycle_shifted = rotate_left(cycle, i)
-        if optimize_column_order and (optimize_column_order_per_cycle or i == 0):
-            graphing_columns_i = determine_column_order(df_gather, cycle_shifted, graphing_columns, column_weights = column_weights,
-                           matrix_initialization_value_column_order = matrix_initialization_value_column_order,
-                        weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric,
-                        column_sorting_algorithm = column_sorting_algorithm,
-                                 verbose = verbose)
+            cycle_shifted = rotate_left(oriented_cycle, i)
+            order_dict_i = {**get_order_dict(cycle_shifted), **fixed_orders}
+            if optimize_column_order and (optimize_column_order_per_cycle or (i == 0 and orientation == 0)):
+                graphing_columns_i = determine_column_order(df_gather, order_dict_i, graphing_columns, column_weights = column_weights,
+                               matrix_initialization_value_column_order = matrix_initialization_value_column_order,
+                            weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric,
+                            column_sorting_algorithm = column_sorting_algorithm,
+                                     verbose = verbose)
 
-        neighbornet_objective = determine_crossing_edges(df_gather, graphing_columns_i, get_order_dict(cycle_shifted), col_weights=column_weights)
+            neighbornet_objective = determine_crossing_edges(df_gather, graphing_columns_i, order_dict_i, col_weights=column_weights)
 
-        if verbose:
-            print(f"neighbornet_objective for iteration {i} = {neighbornet_objective}")
+            if verbose:
+                print(f"neighbornet_objective for iteration {i}{' (reversed cycle)' if orientation else ''} = {neighbornet_objective}")
 
-        # if better, update best cycle, its column order, and the minimum together
-        if (neighbornet_objective < neighbornet_objective_minimum):
-            neighbornet_objective_minimum = neighbornet_objective
-            cycle_best = cycle_shifted
-            graphing_columns_best = graphing_columns_i
+            # if better, update best order, its column order, and the minimum together
+            if (neighbornet_objective < neighbornet_objective_minimum):
+                neighbornet_objective_minimum = neighbornet_objective
+                order_dict_best = order_dict_i
+                graphing_columns_best = graphing_columns_i
 
-    return cycle_best, graphing_columns_best
+    return order_dict_best, graphing_columns_best
 
 
-def sort_clusters_by_agreement(df_gather, order_dict, fixed_column, reordered_column, column_weights = 'value'):
-    df_temp = df_gather.copy()
-    df_temp[fixed_column] = pd.Categorical(df_temp[fixed_column], ordered=True, categories = order_dict[fixed_column])
-    df_temp = df_temp.sort_values(by = fixed_column).copy()
-    msk = df_temp.groupby(reordered_column)[column_weights].transform('max') == df_temp[column_weights]
-    reordered_list = list(df_temp.loc[msk][reordered_column].astype('str').unique())
-    if len(reordered_list) < len(order_dict[reordered_column]):
-        missed_clusters = [x for x in order_dict[reordered_column] if x not in reordered_list]
-        order_dict[reordered_column] = reordered_list + missed_clusters
-    else: 
-        order_dict[reordered_column] = reordered_list 
+def _block_positions(order_dict, column):
+    return {label: i + 1 for i, label in enumerate(order_dict[column])}
+
+
+def _weighted_median(values, weights):
+    order = np.argsort(values, kind='stable')
+    values, weights = values[order], weights[order]
+    return float(values[np.searchsorted(np.cumsum(weights), weights.sum() / 2)])
+
+
+def reorder_by_neighbor_stat(df, order_dict, stable_column, reordered_column, column_weights = 'value', stat = 'barycenter'):
+    """Rank the blocks of `reordered_column` by the weighted mean ('barycenter')
+    or weighted median ('median') position of their neighbors in `stable_column`.
+    Ties keep the block's current position. Mirrors reorder_by_neighbor_stat() in R.
+    """
+    positions = df[stable_column].map(_block_positions(order_dict, stable_column)).to_numpy(dtype=float)
+    weights = df[column_weights].to_numpy(dtype=float)
+    labels = df[reordered_column].to_numpy()
+
+    stats = {}
+    for label in order_dict[reordered_column]:
+        mask = labels == label
+        block_positions, block_weights = positions[mask], weights[mask]
+        if stat == 'barycenter':
+            stats[label] = float((block_positions * block_weights).sum() / block_weights.sum())
+        elif stat == 'median':
+            stats[label] = _weighted_median(block_positions, block_weights)
+        else:
+            raise ValueError(f"'{stat}' is not a valid option; choose 'barycenter' or 'median'")
+
+    current = _block_positions(order_dict, reordered_column)
+    order_dict[reordered_column] = sorted(order_dict[reordered_column], key=lambda label: (stats[label], current[label]))
     return order_dict
 
 
-def sort_greedy_wolf(df, graphing_columns, fixed_column=None, 
-                   random_initializations=1, column_weights = 'value',
-                   sorting_algorithm = 'greedy_wblf', verbose = False):
+def _assign_greedy_slots(parent_positions, current_positions):
+    """Give every block the position of its heaviest neighbor, shifting blocks
+    apart when two want the same one. Port of sort_clusters_by_agreement() in R,
+    whose bookkeeping is per row; every row of a block carries the same position,
+    so the same run is done here one entry per block.
+    """
+    slots = -np.asarray(current_positions, dtype=float)  # unassigned blocks sit at negative positions
+    best = slots.copy()
+    for block in np.argsort(current_positions, kind='stable'):
+        target = float(parent_positions[block])
+        best[block] = target
+        while np.any(slots == target):
+            target += 1
+            # step over the occupant only if it is closer to its own heaviest neighbor
+            if not np.any(best[slots == target] <= best[block]):
+                slots = np.where(slots >= target, slots + 1, slots)
+                break
+        slots[block] = target
+        # close the gap left below the block, if there is one
+        gap = target + 1
+        while gap >= -2:
+            if not np.any(slots == gap):
+                slots = np.where(slots > gap, slots - 1, slots)
+                break
+            gap -= 1
+    return slots
+
+
+def reorder_by_greedy_agreement(df, order_dict, stable_column, reordered_column, column_weights = 'value'):
+    """Place every block of `reordered_column` as close as possible to its
+    heaviest neighbor in `stable_column`. Mirrors reorder_by_greedy_agreement() in R.
+    """
+    # With more than two axes one pair of adjacent blocks is split across many
+    # rows, so sum the weights per pair before picking each block's heaviest neighbor.
+    pair = df.groupby([stable_column, reordered_column], sort=False, observed=True)[column_weights].sum().reset_index()
+    stable_positions = _block_positions(order_dict, stable_column)
+
+    labels = order_dict[reordered_column]
+    parent_positions = np.empty(len(labels), dtype=float)
+    pair_labels = pair[reordered_column].to_numpy()
+    pair_weights = pair[column_weights].to_numpy(dtype=float)
+    pair_stable = pair[stable_column].to_numpy()
+    for i, label in enumerate(labels):
+        rows = np.flatnonzero(pair_labels == label)
+        heaviest = rows[np.argmax(pair_weights[rows])]  # ties: first pair in the data
+        parent_positions[i] = stable_positions[pair_stable[heaviest]]
+
+    current_positions = np.arange(1, len(labels) + 1, dtype=float)
+    # R runs its assignment twice, the second time over the positions the first produced
+    for _ in range(2):
+        slots = _assign_greedy_slots(parent_positions, current_positions)
+        current_positions = scipy.stats.rankdata(slots, method='dense').astype(float)
+
+    order_dict[reordered_column] = [label for _, label in sorted(zip(current_positions, labels))]
+    return order_dict
+
+
+SWEEP_SORTING_ALGORITHMS = ('greedy', 'barycenter', 'median')
+DEPRECATED_SORTING_ALGORITHMS = {'greedy_wolf': True, 'greedy_wblf': False}  # name -> one-sided
+
+
+def resolve_fixed_columns(fixed_column, graphing_columns):
+    """Resolve fixed_column (a name, a position in graphing_columns, or a list of either) to a list of names."""
     if fixed_column is None:
-        fixed_column = graphing_columns[0]
-    elif type(fixed_column) == int:
-        fixed_column = graphing_columns[fixed_column]
-        
-    reordered_column = graphing_columns[graphing_columns != fixed_column]
-    
-    crossing_edges_objective_minimum = np.inf
+        return []
+    entries = fixed_column if isinstance(fixed_column, (list, tuple, np.ndarray, pd.Index)) else [fixed_column]
+    resolved = []
+    for entry in entries:
+        if isinstance(entry, (int, np.integer)) and not isinstance(entry, bool):
+            if not 0 <= entry < len(graphing_columns):
+                raise ValueError(f"fixed_column position {entry} is not a position in graphing_columns (0 to {len(graphing_columns) - 1}).")
+            entry = graphing_columns[entry]
+        elif entry not in graphing_columns:
+            raise ValueError(f"fixed_column '{entry}' is not in graphing_columns.")
+        if entry not in resolved:
+            resolved.append(entry)
+    return resolved
 
-    # make starting order_dict
-    for i in range(random_initializations):
-        order_dict = {}
-        for key in graphing_columns:
-            if (key == reordered_column) or (sorting_algorithm == 'greedy_wblf'):
-                order_dict[key] = random.sample(list(df[key].astype('str').unique()), len(list(df[key].astype('str').unique())))
-            else:
-                order_dict[key] = list(df[key].astype('str').unique())
-                
-        temp_df = df
-        if sorting_algorithm == 'greedy_wblf': 
-            if i%2==0:
-                order_dict = sort_clusters_by_agreement(temp_df, order_dict = order_dict,
-                                           fixed_column = fixed_column,
-                                          reordered_column = reordered_column, column_weights=column_weights)
-                order_dict = sort_clusters_by_agreement(temp_df, order_dict = order_dict,
-                                           fixed_column = reordered_column,
-                                          reordered_column = fixed_column, column_weights=column_weights)
-            else:
-                order_dict = sort_clusters_by_agreement(temp_df, order_dict = order_dict,
-                                           fixed_column = reordered_column,
-                                          reordered_column = fixed_column, column_weights=column_weights)
-                order_dict = sort_clusters_by_agreement(temp_df, order_dict = order_dict,
-                                           fixed_column = fixed_column,
-                                          reordered_column = reordered_column, column_weights=column_weights)
-        elif sorting_algorithm == 'greedy_wolf':
-            order_dict = sort_clusters_by_agreement(temp_df, order_dict = order_dict,
-                                       fixed_column = fixed_column,
-                                      reordered_column = reordered_column, column_weights=column_weights)
 
-        if random_initializations > 1:
-            crossing_edges_objective = determine_crossing_edges(df, graphing_columns, 
-                                                                order_dict, 
-                                                                col_weights=column_weights)
-            if (crossing_edges_objective < crossing_edges_objective_minimum):
-                crossing_edges_objective_minimum = crossing_edges_objective
+def sweep_passes(n_cols, fixed_idx):
+    """(reordered, stable) axis pairs of one forward-then-backward sweep.
+
+    With no fixed axes every axis is reordered against its left neighbor going
+    forward and its right neighbor going back. With fixed axes, order only
+    propagates away from them: a free axis is reordered against its left (right)
+    neighbor only if some fixed axis lies to its left (right). Same schedule as
+    sweep_passes() in the R package.
+    """
+    unconstrained = len(fixed_idx) == 0
+    forward = [(j, j - 1) for j in range(1, n_cols)
+               if j not in fixed_idx and (unconstrained or any(f < j for f in fixed_idx))]
+    backward = [(j, j + 1) for j in range(n_cols - 2, -1, -1)
+                if j not in fixed_idx and (unconstrained or any(f > j for f in fixed_idx))]
+    return forward + backward
+
+
+def sort_by_sweep(df, graphing_columns, sorting_algorithm = 'greedy', fixed_column=None,
+                random_initializations=1, column_weights = 'value',
+                optimize_column_order = True,
+                matrix_initialization_value_column_order = 1e6,
+                weight_scalar_column_order = 1, column_sorting_metric = "edge_crossing",
+                column_sorting_algorithm = "tsp", verbose = False):
+    """Layer-by-layer sweep over any number of axes: one pass forward across the
+    axes and one back, each pass reordering an axis against a neighboring axis.
+
+    'greedy' places every block next to its heaviest neighbor on the adjacent
+    axis; 'barycenter' and 'median' place it at the weighted mean or weighted
+    median position of its neighbors. Fixed axes keep their incoming order. The
+    first initialization starts from the incoming order and each further one from
+    a random order of the non-fixed axes, keeping the fewest crossings. With more
+    than two axes and optimize_column_order, the axis order is chosen from the
+    swept result and the strata are swept again against their new neighbors.
+    Returns (graphing_columns, order_dict). Mirrors sort_by_sweep() in R.
+    """
+    fixed_column = resolve_fixed_columns(fixed_column, graphing_columns)
+    if sorting_algorithm == 'greedy':
+        def reorder_pair(order_dict, stable, reordered):
+            return reorder_by_greedy_agreement(df, order_dict, stable, reordered, column_weights = column_weights)
+    else:
+        def reorder_pair(order_dict, stable, reordered):
+            return reorder_by_neighbor_stat(df, order_dict, stable, reordered, column_weights = column_weights, stat = sorting_algorithm)
+
+    def run_sweeps(columns, start_order_dict = None):
+        fixed_idx = [columns.index(c) for c in fixed_column]
+        passes = sweep_passes(len(columns), fixed_idx)
+        crossing_edges_objective_minimum = np.inf
+        order_dict_best = None
+        for i in range(random_initializations):
+            if start_order_dict is not None:
+                order_dict = {key: list(order) for key, order in start_order_dict.items()}
+            else:
+                order_dict = {key: list(df[key].astype('str').unique()) for key in columns}
+            # The first initialization starts from the incoming order.
+            if i > 0:
+                for key in columns:
+                    if key not in fixed_column:
+                        order_dict[key] = random.sample(order_dict[key], len(order_dict[key]))
+            for reordered, stable in passes:
+                if verbose:
+                    print(f"Reordering {columns[reordered]} against {columns[stable]} by {sorting_algorithm}")
+                order_dict = reorder_pair(order_dict, columns[stable], columns[reordered])
+            if random_initializations > 1:
+                crossing_edges_objective = determine_crossing_edges(df, columns, order_dict, col_weights=column_weights)
+                if crossing_edges_objective < crossing_edges_objective_minimum:
+                    crossing_edges_objective_minimum = crossing_edges_objective
+                    order_dict_best = order_dict
+            else:
                 order_dict_best = order_dict
-        else:
-            order_dict_best = order_dict
-    return order_dict_best
+        return order_dict_best
+
+    if len(fixed_column) == len(graphing_columns):
+        return graphing_columns, {key: list(df[key].astype('str').unique()) for key in graphing_columns}
+
+    order_dict = run_sweeps(graphing_columns)
+    # Which strata cross depends on which axes are adjacent, so after choosing an
+    # axis order the strata are swept again against their new neighbors.
+    if optimize_column_order and len(graphing_columns) > 2:
+        columns_ordered = determine_column_order(df, order_dict, graphing_columns, column_weights = column_weights,
+                           matrix_initialization_value_column_order = matrix_initialization_value_column_order,
+                        weight_scalar_column_order = weight_scalar_column_order, column_sorting_metric = column_sorting_metric,
+                        column_sorting_algorithm = column_sorting_algorithm, verbose = verbose)
+        if list(columns_ordered) != list(graphing_columns):
+            if verbose:
+                print(f"Column order: {columns_ordered}")
+            graphing_columns = list(columns_ordered)
+            order_dict = run_sweeps(graphing_columns, start_order_dict = order_dict)
+    return graphing_columns, order_dict
+
 
 def find_colors_advanced(df_gather, graphing_columns, column_weights = 'value',
                         coloring_algorithm_advanced_option = 'leiden', resolution = 1):
@@ -982,32 +1139,49 @@ def data_sort(
     for col in graphing_columns:
         df[col] = df[col].astype('str')
     
+    if sorting_algorithm in DEPRECATED_SORTING_ALGORITHMS:
+        one_sided = DEPRECATED_SORTING_ALGORITHMS[sorting_algorithm]
+        hint = (", fixed_column=graphing_columns[0]" if fixed_column is None else ", fixed_column=<fixed_column>") if one_sided else ""
+        warnings.warn(f"sorting_algorithm='{sorting_algorithm}' is deprecated; use sorting_algorithm='greedy'{hint} instead.",
+                      FutureWarning, stacklevel=2)
+        if not one_sided:
+            fixed_column = None
+        elif fixed_column is None:
+            fixed_column = graphing_columns[0]
+        sorting_algorithm = 'greedy'
+    fixed_column = resolve_fixed_columns(fixed_column, list(graphing_columns))
+
     if verbose:
         print(f'Sorting Data with sorting algorithm = {sorting_algorithm}')
-    if sorting_algorithm in ['greedy_wolf', 'greedy_wblf']:
-        order_dict = sort_greedy_wolf(df, graphing_columns, fixed_column=fixed_column, 
+    if sorting_algorithm in SWEEP_SORTING_ALGORITHMS:
+        graphing_columns, order_dict = sort_by_sweep(df, list(graphing_columns), sorting_algorithm=sorting_algorithm, fixed_column=fixed_column,
                    random_initializations=random_initializations, column_weights = column_weights,
-                   sorting_algorithm = sorting_algorithm, verbose = verbose)
+                   optimize_column_order = optimize_column_order,
+                   matrix_initialization_value_column_order = matrix_initialization_value_column_order,
+                   weight_scalar_column_order = weight_scalar_column_order,
+                   column_sorting_metric = column_sorting_metric, column_sorting_algorithm = column_sorting_algorithm,
+                   verbose = verbose)
     else:  # neighbornet or tsp
+        fixed_orders = {col: list(df[col].unique()) for col in fixed_column}
         dist_mat, nodes = generate_distance_matrix(df = df, graphing_columns = graphing_columns, 
                                      col_weights=column_weights,
                       matrix_initialization_value = matrix_initialization_value, same_side_matrix_initialization_value = same_side_matrix_initialization_value,
-                              weight_scalar = weight_scalar, sorting_algorithm = sorting_algorithm)
+                              weight_scalar = weight_scalar, sorting_algorithm = sorting_algorithm, fixed_orders = fixed_orders)
         if verbose:
             print(f'Sorting Distance matrix with algorithm {sorting_algorithm}')
         cycle = sort_dist_matrix(dist_mat, nodes, sorting_algorithm = sorting_algorithm)
         if verbose:
             print(f'Determining Optimal Cycle Start')
 
-        cycle, graphing_columns = determine_optimal_cycle_start(df, cycle, graphing_columns, column_weights=column_weights, 
+        order_dict, graphing_columns = determine_optimal_cycle_start(df, cycle, graphing_columns, column_weights=column_weights, 
                                                                     optimize_column_order = optimize_column_order,
                                      optimize_column_order_per_cycle = optimize_column_order_per_cycle, cycle_start_positions = cycle_start_positions,
                                       matrix_initialization_value_column_order = matrix_initialization_value_column_order,
                                       weight_scalar_column_order = weight_scalar_column_order, 
                                         column_sorting_metric = column_sorting_metric,column_sorting_algorithm = column_sorting_algorithm,
-                                                                    verbose = verbose
+                                                                    verbose = verbose, fixed_orders = fixed_orders
                                                  )
-        order_dict = get_order_dict(cycle, graphing_columns)
+        order_dict = {col: order_dict[col] for col in graphing_columns}
     return graphing_columns,order_dict
     
 
@@ -1026,7 +1200,7 @@ def plot_alluvial(df,
                   matrix_initialization_value_column_order = 1e6,
                   weight_scalar_column_order = 1, column_sorting_metric = "edge_crossing",column_sorting_algorithm = "tsp", 
                   cycle_start_positions = None, 
-                  # greedy wolf options
+                  # fixed_column works with every sorting_algorithm; random_initializations with the sweep algorithms
                   fixed_column = None, random_initializations = 1, 
                   # user-defined order arguments
                   order_dict=None, return_order_dict = False,

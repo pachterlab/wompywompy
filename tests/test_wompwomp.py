@@ -101,13 +101,14 @@ def test_plot_alluvial_grouped_nosort_nocolor_alluvial_colored(clus_df_gather):
     return fig
 
 @pytest.mark.mpl_image_compare
-def test_plot_alluvial_greedy_wolf(clus_df_gather):
+def test_plot_alluvial_greedy_fixed_column(clus_df_gather):
     graphing_columns=["tissue", "cluster"]
     fig = plot_alluvial(
         df=clus_df_gather,
         graphing_columns=graphing_columns,
         column_weights="value",
-        sorting_algorithm="greedy_wolf",
+        sorting_algorithm="greedy",
+        fixed_column="tissue",
         match_colors=False,
         color_alluvium=False
     )
@@ -118,13 +119,13 @@ def test_plot_alluvial_greedy_wolf(clus_df_gather):
     return fig
 
 @pytest.mark.mpl_image_compare
-def test_plot_alluvial_greedy_wblf(clus_df_gather):
+def test_plot_alluvial_greedy(clus_df_gather):
     graphing_columns=["tissue", "cluster"]
     fig = plot_alluvial(
         df=clus_df_gather,
         graphing_columns=graphing_columns,
         column_weights="value",
-        sorting_algorithm="greedy_wblf",
+        sorting_algorithm="greedy",
         match_colors=False,
         color_alluvium=False
     )
@@ -333,3 +334,97 @@ def test_objective_more_tsp_3layer_unsorted(more_neighbornet_3_layer_df):
     # fully-specified total order (current axis, then nearest-right axes, then
     # nearest-left axes), matching make_lode_df() in the R package. See wompwomp S1.
     assert num == 77
+
+
+def _clustered_df(n_cols, seed=0):
+    rng = np.random.default_rng(seed)
+    latent = rng.integers(0, 4, 400)
+    data = {}
+    for i in range(n_cols):
+        labels = rng.permutation(list("ABCD"))
+        noisy = np.where(rng.random(400) < 0.8, latent, rng.integers(0, 4, 400))
+        data[f"method{i + 1}"] = labels[noisy]
+    df = pd.DataFrame(data)
+    cols = list(df.columns)
+    return df.groupby(cols).size().reset_index(name="value"), cols
+
+
+@pytest.mark.parametrize("n_cols", [2, 3, 4])
+@pytest.mark.parametrize("sorting_algorithm", ["greedy", "barycenter", "median", "neighbornet", "tsp"])
+def test_fixed_columns_keep_their_order(n_cols, sorting_algorithm):
+    df, cols = _clustered_df(n_cols)
+    incoming = {col: list(df[col].astype(str).unique()) for col in cols}
+    fixed_sets = [[cols[0]], [cols[-1]], [cols[0], cols[-1]]] + ([[cols[1]]] if n_cols > 2 else [])
+    for fixed in fixed_sets:
+        _, order_dict = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm=sorting_algorithm,
+                                  optimize_column_order=False, fixed_column=fixed)
+        for col in fixed:
+            assert order_dict[col] == incoming[col]
+        assert all(sorted(order_dict[col]) == sorted(incoming[col]) for col in cols)
+
+
+@pytest.mark.parametrize("sorting_algorithm", ["greedy", "barycenter", "median"])
+@pytest.mark.parametrize("n_cols", [3, 4])
+def test_sweep_algorithms_sort_any_number_of_axes(n_cols, sorting_algorithm):
+    df, cols = _clustered_df(n_cols)
+    unsorted = determine_crossing_edges(df.copy(), cols, {col: sorted(df[col].unique()) for col in cols}, col_weights="value")
+    for fixed in [None, cols[1]]:
+        columns, order_dict = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm=sorting_algorithm,
+                                        optimize_column_order=False, fixed_column=fixed, random_initializations=3)
+        assert columns == cols
+        assert determine_crossing_edges(df.copy(), columns, order_dict, col_weights="value") < unsorted
+
+
+@pytest.mark.parametrize("sorting_algorithm", ["greedy", "barycenter", "median"])
+def test_sweep_algorithms_optimize_column_order_with_more_than_two_axes(sorting_algorithm):
+    df, _ = _clustered_df(2)
+    df["copy"] = df["method1"]
+    columns, _ = data_sort(df, ["method1", "method2", "copy"], column_weights="value", sorting_algorithm=sorting_algorithm,
+                           optimize_column_order=True)
+    assert sorted(columns) == ["copy", "method1", "method2"]
+    assert abs(columns.index("method1") - columns.index("copy")) == 1
+
+
+def test_fixed_column_accepts_positions_and_rejects_unknown_columns():
+    df, cols = _clustered_df(3)
+    random.seed(1)
+    by_name = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm="greedy", optimize_column_order=False, fixed_column=["method1", "method3"])
+    random.seed(1)
+    by_position = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm="greedy", optimize_column_order=False, fixed_column=[0, 2])
+    assert by_name == by_position
+    with pytest.raises(ValueError):
+        data_sort(df.copy(), cols, column_weights="value", sorting_algorithm="greedy", fixed_column="value")
+    with pytest.raises(ValueError):
+        data_sort(df.copy(), cols, column_weights="value", sorting_algorithm="greedy", fixed_column=3)
+
+
+@pytest.mark.parametrize("old, fixed", [("greedy_wolf", "method1"), ("greedy_wblf", None)])
+def test_deprecated_greedy_names_warn_and_map_to_greedy(old, fixed):
+    df, cols = _clustered_df(2)
+    random.seed(3)
+    with pytest.warns(FutureWarning, match="deprecated"):
+        old_result = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm=old)
+    random.seed(3)
+    new_result = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm="greedy", fixed_column=fixed)
+    assert old_result == new_result
+
+
+@pytest.mark.parametrize("sorting_algorithm", ["greedy", "barycenter", "median"])
+def test_first_initialization_is_deterministic(sorting_algorithm):
+    df, cols = _clustered_df(3)
+    random.seed(1)
+    first = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm=sorting_algorithm, optimize_column_order=False)
+    random.seed(99)
+    second = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm=sorting_algorithm, optimize_column_order=False)
+    assert first == second
+
+
+@pytest.mark.parametrize("sorting_algorithm", ["greedy", "barycenter", "median"])
+def test_random_initializations_never_do_worse(sorting_algorithm):
+    df, cols = _clustered_df(3, seed=2)
+    _, single = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm=sorting_algorithm, optimize_column_order=False)
+    random.seed(5)
+    _, several = data_sort(df.copy(), cols, column_weights="value", sorting_algorithm=sorting_algorithm,
+                           optimize_column_order=False, random_initializations=5)
+    assert (determine_crossing_edges(df.copy(), cols, several, col_weights="value")
+            <= determine_crossing_edges(df.copy(), cols, single, col_weights="value"))

@@ -75,8 +75,8 @@ def main():  # noqa: C901
         "--sorting_algorithm",
         type=str,
         default="neighbornet",
-        choices=["neighbornet", "tsp", "greedy_wolf", "greedy_wblf"],
-        help="Sorting algorithm to use for determining stratum order."
+        choices=["neighbornet", "tsp", "greedy", "barycenter", "median", "greedy_wolf", "greedy_wblf"],
+        help="Sorting algorithm to use for determining stratum order. Every algorithm handles any number of columns. 'greedy_wolf' and 'greedy_wblf' are deprecated aliases of 'greedy'."
     )
     parser_plot_alluvial.add_argument(
         "--optimize_column_order",
@@ -142,7 +142,7 @@ def main():  # noqa: C901
         "--column_sorting_algorithm",
         type=str,
         default="tsp",
-        choices=["tsp", "neighbornet", "greedy_wolf", "greedy_wblf"],
+        choices=["tsp", "neighbornet"],
         help="Algorithm used for ordering columns."
     )
     parser_plot_alluvial.add_argument(
@@ -153,18 +153,19 @@ def main():  # noqa: C901
         help="Manual start positions for column-order cycles."
     )
 
-    # ---------- Greedy Wolf Options ----------
+    # ---------- Fixed Columns / Greedy Options ----------
     parser_plot_alluvial.add_argument(
         "--fixed_column",
+        nargs="+",
         type=str,
         default=None,
-        help="Fix a specific column in place when using greedy wolf."
+        help="Columns whose stratum order is kept as given while the other columns are sorted (any sorting algorithm)."
     )
     parser_plot_alluvial.add_argument(
         "--random_initializations",
         type=int,
         default=1,
-        help="Number of random starts for greedy algorithms."
+        help="Number of initializations for 'greedy', 'barycenter' and 'median' (the first from the incoming order, the rest random), keeping the fewest crossings."
     )
 
     # ---------- User Order ----------

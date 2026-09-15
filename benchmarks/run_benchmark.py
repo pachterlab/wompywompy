@@ -151,7 +151,7 @@ def main():
     p_single.add_argument("--n-columns", type=int, default=3)
     p_single.add_argument("--n-categories", type=int, default=8)
     p_single.add_argument("--sorting-algorithm", default="neighbornet",
-                           choices=["neighbornet", "tsp", "greedy_wolf", "greedy_wblf", "none"])
+                           choices=["neighbornet", "tsp", "greedy", "barycenter", "median", "none"])
     p_single.add_argument("--optimize-column-order", action="store_true")
     p_single.add_argument("--out", default="results/single.csv")
     p_single.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)

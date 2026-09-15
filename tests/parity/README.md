@@ -3,6 +3,14 @@
 Two harnesses:
 
 * `run_parity.py` -- the **W\_POMP crossing objective** `L` (below).
+* `run_sort_parity.py` -- the **W\_POMP sweep sorters**: for the same random
+  case, checks that R `sort_to_uncross()` and Python `data_sort()` put the
+  blocks of every axis in the same order for `greedy`, `barycenter` and
+  `median`, with and without fixed axes. Only the deterministic path is
+  compared -- one initialization (the packages draw random restarts from
+  different RNGs) and no axis-order optimization (R's `TSP::solve_TSP` and
+  `python_tsp` are different heuristics). Should be 100%:
+  `PARITY_RSCRIPT=... python run_sort_parity.py --n 400 --seed 0 --max-layers 5`
 * `run_color_parity.py` -- the **W\_LOMP colouring**: for the same random case,
   compares R `get_lode_clusters()` with Python `find_colors_advanced()` /
   `find_colors_reference()` as partitions of the (column, value) nodes, up to
